@@ -1,0 +1,63 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Force rebuild even if the base image is unchanged
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull upstream base
+        run: docker pull ghcr.io/lampac-nextgen/lampac:latest
+
+      - name: Compute build key (base digest + Dockerfile hash)
+        id: key
+        run: |
+          BASE="$(docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/lampac-nextgen/lampac:latest)"
+          DF="$(sha256sum Dockerfile | cut -d' ' -f1)"
+          echo "value=${BASE}|${DF}" >> "$GITHUB_OUTPUT"
+
+      - name: Compare with published image
+        id: cmp
+        run: |
+          OLD="none"
+          if docker pull ghcr.io/whishp/lampac-va:latest >/dev/null 2>&1; then
+            OLD="$(docker inspect --format '{{ index .Config.Labels "build.key" }}' ghcr.io/whishp/lampac-va:latest || echo none)"
+          fi
+          echo "old=${OLD}" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.key.outputs.value }}" = "$OLD" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.cmp.outputs.changed == 'true' || inputs.force
+        run: |
+          docker build \
+            --label build.key="${{ steps.key.outputs.value }}" \
+            --label org.opencontainers.image.source="https://github.com/${{ github.repository }}" \
+            -t ghcr.io/whishp/lampac-va:latest .
+          docker push ghcr.io/whishp/lampac-va:latest
